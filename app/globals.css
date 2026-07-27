@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens — light/dark validated palette (see dataviz skill).
+ * Roles, not raw hex, are used everywhere else in the app.
+ */
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;      /* card / chart surface */
+  --page: #f9f9f7;           /* page background */
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --border-hairline: rgba(11, 11, 11, 0.1);
+  --baseline: #c3c2b7;
+
+  /* categorical (fixed order — slot 1 = Budgeted, slot 2 = Actual) */
+  --cat-1: #2a78d6; /* blue */
+  --cat-2: #eb6834; /* orange */
+
+  /* status (fixed, never themed by hue elsewhere) */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --status-neutral: #898781;
+
+  --success-text: #006300;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --border-hairline: rgba(255, 255, 255, 0.1);
+    --baseline: #383835;
+
+    --cat-1: #3987e5;
+    --cat-2: #d95926;
+
+    --status-good: #0ca30c;
+    --status-warning: #fab219;
+    --status-serious: #ec835a;
+    --status-critical: #e66767;
+    --status-neutral: #898781;
+
+    --success-text: #0ca30c;
+  }
+}
+
+@theme inline {
+  --color-surface-1: var(--surface-1);
+  --color-page: var(--page);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-gridline: var(--gridline);
+  --color-baseline: var(--baseline);
+
+  --color-cat-1: var(--cat-1);
+  --color-cat-2: var(--cat-2);
+
+  --color-status-good: var(--status-good);
+  --color-status-warning: var(--status-warning);
+  --color-status-serious: var(--status-serious);
+  --color-status-critical: var(--status-critical);
+  --color-status-neutral: var(--status-neutral);
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body {
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
+
+* {
+  border-color: var(--border-hairline);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
