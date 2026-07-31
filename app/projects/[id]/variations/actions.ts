@@ -24,7 +24,7 @@ export async function createVariationOrder(projectId: string, formData: FormData
       title,
       description: description || null,
       costImpact: Number.isFinite(costImpact) ? costImpact : 0,
-      scheduleImpactDays: Number.isFinite(scheduleImpactDays) ? scheduleImpactDays : 0,
+      scheduleImpactDays: Number.isFinite(scheduleImpactDays) ? Math.round(scheduleImpactDays) : 0,
       budgetLineId,
       scheduleTaskId,
     },

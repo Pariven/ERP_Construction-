@@ -141,7 +141,7 @@ export default async function BudgetPage({ params }: { params: Promise<{ id: str
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">
-            <span className="text-text-secondary">Budgeted amount (USD)</span>
+            <span className="text-text-secondary">Budgeted amount (RM)</span>
             <input
               name="budgeted"
               type="number"

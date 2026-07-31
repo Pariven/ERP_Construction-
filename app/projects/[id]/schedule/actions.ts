@@ -33,7 +33,7 @@ export async function updateTaskProgress(
   formData: FormData
 ) {
   const percentComplete = Number(formData.get("percentComplete") ?? 0);
-  const clamped = Math.min(100, Math.max(0, Number.isFinite(percentComplete) ? percentComplete : 0));
+  const clamped = Math.round(Math.min(100, Math.max(0, Number.isFinite(percentComplete) ? percentComplete : 0)));
 
   await prisma.scheduleTask.update({
     where: { id: taskId },

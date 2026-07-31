@@ -27,13 +27,29 @@ model Project {
   startDate     DateTime
   endDate       DateTime?
   status        String   @default("active") // active | on_hold | complete | cancelled
+  imageUrl      String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  budgetLines BudgetLine[]
-  tasks       ScheduleTask[]
-  variations  VariationOrder[]
-  inspections Inspection[]
+  budgetLines  BudgetLine[]
+  tasks        ScheduleTask[]
+  variations   VariationOrder[]
+  inspections  Inspection[]
+  bq           BillOfQuantities?
+  certificates InterimCertificate[]
+  retentionReleases RetentionRelease[]
+  extensionsOfTime  ExtensionOfTime[]
+  finalAccount      FinalAccount?
+  procurementPackages ProcurementPackage[]
+  documents           Document[]
+
+  retentionPct Float @default(5) // % of each valuation held back as retention
+
+  // Contract terms for LAD (liquidated ascertained damages) exposure.
+  ladRatePerDay        Float   @default(0)
+  ladGraceDays         Int     @default(0) // days of overrun before LAD starts accruing
+  ladCapPct            Float?  // cap as % of contract value; null = uncapped
+  hasFluctuationClause Boolean @default(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +130,8 @@ model VariationOrder {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  extensionsOfTime ExtensionOfTime[]
+
   @@index([projectId])
   @@index([projectId, status])
 }
@@ -188,4 +206,233 @@ model Defect {
   closedBy         String?
 
   @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Bill of Quantities — Elements → Bills → Items. The foundation VO pricing
+// and valuations pull from: an item's `amount` (qty × rate, or a lump sum
+// for provisional/PC sums) is what gets claimed against in an IPC.
+// ---------------------------------------------------------------------------
+
+model BillOfQuantities {
+  id        String   @id @default(cuid())
+  projectId String   @unique
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String   @default("Bill of Quantities")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  elements BqElement[]
+}
+
+model BqElement {
+  id        String           @id @default(cuid())
+  bqId      String
+  bq        BillOfQuantities @relation(fields: [bqId], references: [id], onDelete: Cascade)
+  name      String
+  sortOrder Int              @default(0)
+
+  bills BqBill[]
+
+  @@index([bqId])
+}
+
+model BqBill {
+  id        String    @id @default(cuid())
+  elementId String
+  element   BqElement @relation(fields: [elementId], references: [id], onDelete: Cascade)
+  name      String
+  sortOrder Int       @default(0)
+
+  items BqItem[]
+
+  @@index([elementId])
+}
+
+model BqItem {
+  id          String   @id @default(cuid())
+  billId      String
+  bill        BqBill   @relation(fields: [billId], references: [id], onDelete: Cascade)
+  costCode    String?  // optional link to BudgetLine.costCode, for cross-reference
+  description String
+  unit        String   // m3, m2, nr, sum, ...
+  kind        String   @default("measured") // measured | provisional_sum | pc_sum
+  quantity    Float?
+  rate        Float?
+  amount      Float    // measured: quantity * rate. sums: entered directly.
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  ipcLines IpcLine[]
+
+  @@index([billId])
+}
+
+// Reusable unit-rate database, shared across every project — not re-priced
+// from scratch each time.
+model RateLibraryItem {
+  id          String   @id @default(cuid())
+  trade       String
+  description String
+  unit        String
+  rate        Float
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([trade])
+}
+
+// ---------------------------------------------------------------------------
+// Interim Payment Certificates — % complete per BQ item → claim value →
+// less retention → less previously certified = amount certified this period.
+// ---------------------------------------------------------------------------
+
+model InterimCertificate {
+  id                String    @id @default(cuid())
+  projectId         String
+  project           Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  number            Int
+  certifiedDate     DateTime  @default(now())
+  retentionPct      Float     @default(5)
+  grossValuation    Float     @default(0) // cumulative claim value to date, across all lines
+  retentionHeld     Float     @default(0) // cumulative: grossValuation * retentionPct
+  previousCertified Float     @default(0) // prior certificate's net (post-retention) cumulative
+  amountCertified   Float     @default(0) // net amount due this period
+  status            String    @default("draft") // draft | certified
+  createdAt         DateTime  @default(now())
+
+  lines IpcLine[]
+
+  @@index([projectId])
+  @@unique([projectId, number])
+}
+
+model IpcLine {
+  id              String              @id @default(cuid())
+  certificateId   String
+  certificate     InterimCertificate  @relation(fields: [certificateId], references: [id], onDelete: Cascade)
+  bqItemId        String
+  bqItem          BqItem              @relation(fields: [bqItemId], references: [id])
+  percentComplete Float               @default(0) // cumulative % of this item claimed to date
+  valueToDate     Float               @default(0) // bqItem.amount * percentComplete / 100
+
+  @@index([certificateId])
+  @@unique([certificateId, bqItemId])
+}
+
+model RetentionRelease {
+  id         String   @id @default(cuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  milestone  String   // practical_completion | final
+  amount     Float
+  releasedAt DateTime @default(now())
+  note       String?
+
+  @@index([projectId])
+}
+
+// ---------------------------------------------------------------------------
+// Extension of Time — separate from cost VOs since EOT affects only
+// schedule/liability, not price, unless linked to a costed VO. Approving one
+// pushes the project's contractual end date out by the approved days (see
+// lib/eot.ts), which is what LAD exposure below measures against.
+// ---------------------------------------------------------------------------
+
+model ExtensionOfTime {
+  id           String    @id @default(cuid())
+  projectId    String
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  code         String    // e.g. "EOT-002"
+  reason       String
+  daysClaimed  Int
+  daysApproved Int?      // set once decided; may differ from daysClaimed
+  status       String    @default("claimed") // claimed | under_review | approved | rejected
+  linkedVoId   String?
+  linkedVo     VariationOrder? @relation(fields: [linkedVoId], references: [id])
+  claimedDate  DateTime  @default(now())
+  decidedDate  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([projectId])
+}
+
+// ---------------------------------------------------------------------------
+// Final Account — reconciliation of original BQ + all approved VOs +
+// fluctuations = final contract sum. The numbers themselves are computed at
+// render time (see the final-account page); this record just tracks the
+// fluctuation adjustment and whether it's been agreed with the client.
+// ---------------------------------------------------------------------------
+
+model FinalAccount {
+  id                String    @id @default(cuid())
+  projectId         String    @unique
+  project           Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fluctuationAmount Float     @default(0)
+  status            String    @default("draft") // draft | agreed
+  agreedDate        DateTime?
+  notes             String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Procurement — subcontractor tender comparison. Log multiple quotes per
+// package, compare against your own estimate, award the winner.
+// ---------------------------------------------------------------------------
+
+model ProcurementPackage {
+  id          String   @id @default(cuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name        String
+  costCode    String?  // optional cross-reference to a BudgetLine
+  ownEstimate Float?
+  status      String   @default("open") // open | awarded | cancelled
+  createdAt   DateTime @default(now())
+
+  quotes ProcurementQuote[]
+
+  @@index([projectId])
+}
+
+model ProcurementQuote {
+  id            String             @id @default(cuid())
+  packageId     String
+  package       ProcurementPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  subcontractor String
+  amount        Float
+  notes         String?
+  isAwarded     Boolean            @default(false)
+  submittedAt   DateTime           @default(now())
+
+  // Only meaningful once isAwarded — tracks whether the sub has been paid.
+  paymentStatus String    @default("pending") // pending | paid
+  paidAmount    Float?
+  paidDate      DateTime?
+
+  @@index([packageId])
+}
+
+// ---------------------------------------------------------------------------
+// Documents — drawings, contracts, correspondence. VOs and disputes often
+// hinge on "which drawing revision were we working to," so each doc keeps a
+// free-text version/revision alongside the file.
+// ---------------------------------------------------------------------------
+
+model Document {
+  id         String   @id @default(cuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  category   String   // drawing | contract | correspondence | other
+  name       String
+  version    String?
+  fileUrl    String
+  fileType   String?
+  notes      String?
+  uploadedAt DateTime @default(now())
+
+  @@index([projectId])
+  @@index([projectId, category])
 }

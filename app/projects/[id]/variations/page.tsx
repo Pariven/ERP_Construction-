@@ -140,7 +140,7 @@ export default async function VariationsPage({ params }: { params: Promise<{ id:
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">
-            <span className="text-text-secondary">Cost impact (USD)</span>
+            <span className="text-text-secondary">Cost impact (RM)</span>
             <input
               name="costImpact"
               type="number"

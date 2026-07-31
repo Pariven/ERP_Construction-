@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { StatTile } from "@/app/components/StatTile";
 import { Badge } from "@/app/components/Badge";
 import { BudgetChart, type BudgetChartRow } from "@/app/components/BudgetChart";
+import { SCurveChart } from "@/app/components/SCurveChart";
 import { ScheduleProgressList, type ScheduleRow } from "@/app/components/ScheduleProgressList";
 import {
   DEFECT_STATUS_LABEL,
@@ -11,33 +12,14 @@ import {
   VO_STATUS_TONE,
   formatCurrency,
   formatDate,
-  type BadgeTone,
 } from "@/lib/format";
+import { budgetHealth as budgetTone, expectedPercent, scheduleHealth as scheduleTone } from "@/lib/health";
+import { computeProjectSCurve, computeRetentionSummary } from "@/lib/bq";
+import { calculateLadExposure } from "@/lib/eot";
 
 export const dynamic = "force-dynamic";
 
-function expectedPercent(start: Date, end: Date, now: Date) {
-  const total = end.getTime() - start.getTime();
-  if (total <= 0) return 100;
-  const elapsed = now.getTime() - start.getTime();
-  return Math.min(100, Math.max(0, (elapsed / total) * 100));
-}
-
-function scheduleTone(percentComplete: number, expected: number): { tone: BadgeTone; label: string } {
-  if (percentComplete >= 100) return { tone: "good", label: "Complete" };
-  const diff = percentComplete - expected;
-  if (diff >= -5) return { tone: "good", label: "On track" };
-  if (diff >= -15) return { tone: "warning", label: "Behind" };
-  return { tone: "critical", label: "Behind" };
-}
-
-function budgetTone(actual: number, budgeted: number): { tone: BadgeTone; label: string } {
-  if (budgeted <= 0) return { tone: "neutral", label: "—" };
-  const ratio = actual / budgeted;
-  if (ratio <= 1) return { tone: "good", label: "Under budget" };
-  if (ratio <= 1.05) return { tone: "warning", label: "Near budget" };
-  return { tone: "critical", label: "Over budget" };
-}
+const VO_STALE_AFTER_DAYS = 14;
 
 export default async function ProjectDashboardPage({
   params,
@@ -46,22 +28,29 @@ export default async function ProjectDashboardPage({
 }) {
   const { id } = await params;
 
-  const project = await prisma.project.findUniqueOrThrow({
-    where: { id },
-    include: {
-      budgetLines: { orderBy: { costCode: "asc" } },
-      tasks: { orderBy: { startDate: "asc" } },
-      variations: { orderBy: { createdAt: "desc" } },
-      inspections: {
-        include: { results: { include: { defect: true } } },
+  const [project, certificates, retentionReleases, bq, procurementPackages, eots] = await Promise.all([
+    prisma.project.findUniqueOrThrow({
+      where: { id },
+      include: {
+        budgetLines: { orderBy: { costCode: "asc" } },
+        tasks: { orderBy: { startDate: "asc" } },
+        variations: { orderBy: { createdAt: "desc" } },
+        inspections: { include: { results: { include: { defect: true } } } },
       },
-    },
-  });
+    }),
+    prisma.interimCertificate.findMany({ where: { projectId: id }, orderBy: { certifiedDate: "asc" } }),
+    prisma.retentionRelease.findMany({ where: { projectId: id } }),
+    prisma.billOfQuantities.findUnique({
+      where: { projectId: id },
+      include: { elements: { include: { bills: { include: { items: true } } } } },
+    }),
+    prisma.procurementPackage.findMany({ where: { projectId: id }, include: { quotes: true } }),
+    prisma.extensionOfTime.findMany({ where: { projectId: id } }),
+  ]);
 
   const now = new Date();
 
   const totalBudgeted = project.budgetLines.reduce((s, b) => s + b.budgeted, 0);
-  const totalCommitted = project.budgetLines.reduce((s, b) => s + b.committed, 0);
   const totalActual = project.budgetLines.reduce((s, b) => s + b.actual, 0);
   const budgetStatus = budgetTone(totalActual, totalBudgeted);
 
@@ -109,6 +98,29 @@ export default async function ProjectDashboardPage({
     .filter((d): d is NonNullable<typeof d> => Boolean(d) && d!.status !== "closed");
   const criticalDefects = openDefects.filter((d) => d.severity === "critical" || d.severity === "high").length;
 
+  // --- Payments / retention ------------------------------------------------
+  const bqTotal = (bq?.elements ?? [])
+    .flatMap((e) => e.bills)
+    .flatMap((b) => b.items)
+    .reduce((s, i) => s + i.amount, 0);
+  const { latestCert, retentionCurrentlyHeld, nextIpcDueEstimate } = computeRetentionSummary(
+    certificates,
+    retentionReleases
+  );
+  const sCurve = computeProjectSCurve(project, bqTotal, certificates);
+
+  // --- Subcontractor payment status -----------------------------------------
+  const awardedQuotes = procurementPackages.flatMap((p) => p.quotes).filter((q) => q.isAwarded);
+  const paymentsDue = awardedQuotes.filter((q) => q.paymentStatus !== "paid");
+  const amountDueToSubs = paymentsDue.reduce((s, q) => s + q.amount, 0);
+
+  // --- EOT / LAD -------------------------------------------------------------
+  const eotPendingDays = eots
+    .filter((e) => e.status === "claimed" || e.status === "under_review")
+    .reduce((s, e) => s + e.daysClaimed, 0);
+  const eotApprovedDays = eots.filter((e) => e.status === "approved").reduce((s, e) => s + (e.daysApproved ?? 0), 0);
+  const lad = calculateLadExposure(project, now);
+
   return (
     <div className="flex flex-col gap-6">
       {/* Stat tiles — the four things this dashboard exists to answer */}
@@ -153,6 +165,51 @@ export default async function ProjectDashboardPage({
         />
       </div>
 
+      {/* Payments & contract admin — the daily QS checks */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <StatTile
+          label="Retention held"
+          value={formatCurrency(retentionCurrentlyHeld)}
+          accent="var(--status-warning)"
+          sub={`${project.retentionPct}% of each valuation`}
+        />
+        <StatTile
+          label="Next IPC due"
+          value={nextIpcDueEstimate ? formatDate(nextIpcDueEstimate) : "—"}
+          accent="var(--cat-1)"
+          sub={latestCert ? `Est., 30 days after IPC-${latestCert.number}` : "No IPCs raised yet"}
+        />
+        <StatTile
+          label="Subcontractor payments"
+          value={paymentsDue.length}
+          accent={paymentsDue.length > 0 ? "var(--status-critical)" : "var(--status-good)"}
+          sub={paymentsDue.length > 0 ? `${formatCurrency(amountDueToSubs)} due` : "All awarded quotes paid"}
+        />
+        <StatTile
+          label="EOT / LAD exposure"
+          value={formatCurrency(lad.exposure)}
+          accent={lad.exposure > 0 ? "var(--status-critical)" : "var(--status-good)"}
+          sub={`${eotPendingDays}d pending · ${eotApprovedDays}d approved`}
+        />
+      </div>
+
+      {/* Cash flow */}
+      <div className="rounded-lg border border-[var(--border-hairline)] bg-surface-1 p-4">
+        <div className="mb-1 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-text-primary">Cash flow — planned vs. actual</h2>
+          <Link href={`/projects/${project.id}/cvr`} className="text-xs text-cat-1 hover:underline">
+            View CVR →
+          </Link>
+        </div>
+        {sCurve.length === 0 ? (
+          <p className="py-8 text-center text-sm text-text-secondary">
+            Add Bill of Quantities items to generate the planned baseline.
+          </p>
+        ) : (
+          <SCurveChart data={sCurve} />
+        )}
+      </div>
+
       {/* Budget vs actual */}
       <div className="rounded-lg border border-[var(--border-hairline)] bg-surface-1 p-4">
         <div className="mb-1 flex items-center justify-between">
@@ -187,20 +244,31 @@ export default async function ProjectDashboardPage({
             <p className="text-sm text-text-secondary">No variation orders yet.</p>
           ) : (
             <div className="flex flex-col divide-y divide-[var(--gridline)]">
-              {recentVos.map((v) => (
-                <div key={v.id} className="flex items-start justify-between gap-2 py-2.5 first:pt-0 last:pb-0">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-text-primary">
-                      {v.code} — {v.title}
+              {recentVos.map((v) => {
+                const isPending = v.status === "submitted" || v.status === "disputed";
+                const ageDays = isPending
+                  ? Math.floor((now.getTime() - (v.submittedAt ?? v.createdAt).getTime()) / 86_400_000)
+                  : null;
+                const isStale = ageDays !== null && ageDays > VO_STALE_AFTER_DAYS;
+                return (
+                  <div key={v.id} className="flex items-start justify-between gap-2 py-2.5 first:pt-0 last:pb-0">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-text-primary">
+                        {v.code} — {v.title}
+                      </div>
+                      <div className="text-xs text-text-muted">
+                        {formatCurrency(v.costImpact)}
+                        {v.scheduleImpactDays !== 0 ? ` · ${v.scheduleImpactDays}d` : ""}
+                        {ageDays !== null && !isStale ? ` · ${ageDays}d pending` : ""}
+                      </div>
                     </div>
-                    <div className="text-xs text-text-muted">
-                      {formatCurrency(v.costImpact)}
-                      {v.scheduleImpactDays !== 0 ? ` · ${v.scheduleImpactDays}d` : ""}
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <Badge tone={VO_STATUS_TONE[v.status] ?? "neutral"} label={VO_STATUS_LABEL[v.status] ?? v.status} />
+                      {isStale && <Badge tone="critical" label={`Stale · ${ageDays}d`} />}
                     </div>
                   </div>
-                  <Badge tone={VO_STATUS_TONE[v.status] ?? "neutral"} label={VO_STATUS_LABEL[v.status] ?? v.status} />
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
