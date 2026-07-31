@@ -10,6 +10,18 @@ export const metadata: Metadata = {
   description: "Project, budget, schedule, VO and QA tracking for construction projects",
 };
 
+// The sidebar queries the database on every render (project list for the
+// switcher), and this layout wraps every route including the built-in
+// /_not-found page — without this, `next build` tries to statically
+// pre-render that page, which runs the query at build time rather than
+// request time. Locally that's masked because DATABASE_URL happens to be
+// set for local SQLite; on Vercel, with no DB reachable at build time, it
+// fails the whole build. Every page in this app already reads live data
+// (`dynamic = "force-dynamic"` per-page) — there's no meaningful static
+// page here anyway, so forcing it at the layout level closes this gap for
+// the one route that isn't a normal page.
+export const dynamic = "force-dynamic";
+
 // Applies a saved theme choice before first paint so switching pages (or
 // reloading) never flashes the OS-default theme before snapping to the
 // viewer's actual pick.
